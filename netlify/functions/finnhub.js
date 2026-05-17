@@ -1,26 +1,37 @@
 exports.handler = async function (event) {
-  // path comes in as ?path=/api/v1/quote&symbol=NVDA&token=xxx
-  // We strip the token from the client and inject the server-side one if set
   const params = event.queryStringParameters || {};
   const path = params.path;
 
   if (!path) {
-    return { statusCode: 400, body: JSON.stringify({ error: "path required" }) };
+    return {
+      statusCode: 400,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ error: "path required" }),
+    };
   }
 
-  // Build query string from all params except 'path'
+  // Rebuild the URL without double-encoding — pass params directly
   const query = Object.entries(params)
     .filter(([k]) => k !== "path")
-    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
 
   const url = `https://finnhub.io${path}${query ? "?" + query : ""}`;
 
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Port-App/1.0" },
+      headers: {
+        "User-Agent": "Port-App/2.0",
+        "Accept": "application/json",
+      },
     });
+
     const body = await res.text();
+
+    if (!res.ok) {
+      console.error("Finnhub error:", res.status, url, body.slice(0, 200));
+    }
+
     return {
       statusCode: res.status,
       headers: {
@@ -30,8 +41,10 @@ exports.handler = async function (event) {
       body,
     };
   } catch (e) {
+    console.error("Finnhub fetch error:", e.message);
     return {
       statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
       body: JSON.stringify({ error: e.message }),
     };
   }

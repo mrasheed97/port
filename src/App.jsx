@@ -637,25 +637,35 @@ const getCandles=(t,r,from,to,k)=>fhFetch("/api/v1/stock/candle",{symbol:t,resol
 async function callAI(body){
   try{
     const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),24000);
-    const res=await fetch("/.netlify/functions/ai",{method:"POST",headers:{"Content-Type":"application/json"},signal:ctrl.signal,body:JSON.stringify({model:"claude-sonnet-4-5",...body})});
+    const res=await fetch("/.netlify/functions/ai",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      signal:ctrl.signal,
+      body:JSON.stringify({model:"claude-sonnet-4-6",...body})
+    });
     clearTimeout(timer);
-    if(!res.ok)return null;
+    if(!res.ok){console.error("AI call failed:",res.status);return null;}
     const data=await res.json();
-    if(data.error)return null;
+    if(data.error){console.error("AI error:",data.error);return null;}
     return data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-  }catch{return null;}
+  }catch(e){console.error("AI exception:",e.message);return null;}
 }
 async function callAIJSON(prompt){
-  const text=await callAI({max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]});
+  const text=await callAI({max_tokens:1200,messages:[{role:"user",content:prompt}]});
   if(!text)return null;
-  try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch{return null;}
+  try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch(e){
+    // Try to extract JSON from text
+    const m=text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+    if(m)try{return JSON.parse(m[0]);}catch{}
+    return null;
+  }
 }
 async function callAIText(prompt,onChunk,maxTokens=1200){
-  onChunk("Researching…");
-  const text=await callAI({max_tokens:maxTokens,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]});
-  if(!text){onChunk("Analysis unavailable — try again.");return "";}
+  onChunk("Analyzing…");
+  const text=await callAI({max_tokens:maxTokens,messages:[{role:"user",content:prompt}]});
+  if(!text){onChunk("Analysis unavailable — check API key in Netlify settings.");return "";}
   const words=text.split(" ");let built="";
-  for(let i=0;i<words.length;i++){built+=(i===0?"": " ")+words[i];if(i%5===0)onChunk(built);await new Promise(r=>setTimeout(r,12));}
+  for(let i=0;i<words.length;i++){built+=(i===0?"": " ")+words[i];if(i%4===0)onChunk(built);await new Promise(r=>setTimeout(r,10));}
   onChunk(text);return text;
 }
 

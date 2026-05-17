@@ -20,15 +20,15 @@ exports.handler = async function (event) {
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }),
+      body: JSON.stringify({ error: "ANTHROPIC_API_KEY not set in Netlify environment variables" }),
     };
   }
 
   try {
     const body = JSON.parse(event.body);
 
-    // Force correct model name
-    body.model = "claude-sonnet-4-5";
+    // Always use latest model
+    body.model = "claude-sonnet-4-6";
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -42,9 +42,8 @@ exports.handler = async function (event) {
 
     const responseBody = await response.text();
 
-    // Log errors for debugging
     if (!response.ok) {
-      console.error("Anthropic error:", response.status, responseBody.slice(0, 500));
+      console.error("Anthropic API error:", response.status, responseBody.slice(0, 300));
     }
 
     return {
@@ -52,11 +51,12 @@ exports.handler = async function (event) {
       headers: {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
       },
       body: responseBody,
     };
   } catch (err) {
-    console.error("Function error:", err.message);
+    console.error("Function exception:", err.message);
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
