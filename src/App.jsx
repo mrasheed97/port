@@ -310,18 +310,11 @@ function bsGamma(S,K,T,sigma){
 
 /* ─── SPOT FETCH ─────────────────────────────────────────────────────────── */
 async function fetchSpot(ticker){
-  const sym=ticker==="SPX"?"%5EGSPC":ticker;
-  for(const host of ["query1","query2"]){
-    try{
-      const r=await fetch(`https://${host}.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`,
-        {headers:{Accept:"application/json"},signal:AbortSignal.timeout(4000)});
-      if(r.ok){const d=await r.json();const p=d?.chart?.result?.[0]?.meta?.regularMarketPrice;if(p&&p>0)return p;}
-    }catch{}
-  }
+  // Route through Netlify Function — no CORS issues, runs server-side
   try{
-    const r=await fetch(`https://corsproxy.io/?https://query1.finance.yahoo.com/v7/finance/quote?symbols=${sym}`,{signal:AbortSignal.timeout(6000)});
-    if(r.ok){const d=await r.json();const p=d?.quoteResponse?.result?.[0]?.regularMarketPrice;if(p&&p>0)return p;}
-  }catch{}
+    const r=await fetch(`/.netlify/functions/spot?ticker=${encodeURIComponent(ticker)}`);
+    if(r.ok){const d=await r.json();if(d.price&&d.price>0){console.log("[Port] spot via function:",d.price,d.source);return d.price;}}
+  }catch(e){console.warn("[Port] spot function failed:",e.message);}
   return null;
 }
 
@@ -394,12 +387,16 @@ async function fetchPolygonGEX(ticker,apiKey){
 }
 
 /* ─── FINNHUB ────────────────────────────────────────────────────────────── */
-async function fhFetch(url){try{const r=await fetch(url);return r.ok?r.json():null;}catch{return null;}}
-const getQuote   = (t,k)=>fhFetch(`https://finnhub.io/api/v1/quote?symbol=${t}&token=${k}`);
-const getProfile = (t,k)=>fhFetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${t}&token=${k}`);
-const getMetrics = (t,k)=>fhFetch(`https://finnhub.io/api/v1/stock/metric?symbol=${t}&metric=all&token=${k}`);
-const getNews    = (t,k)=>{const td=todayStr(),pd=new Date(Date.now()-7*86400000).toISOString().slice(0,10);return fhFetch(`https://finnhub.io/api/v1/company-news?symbol=${t}&from=${pd}&to=${td}&token=${k}`);}
-const getRec     = (t,k)=>fhFetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${t}&token=${k}`);
+async function fhFetch(path, params){
+  // Route through Netlify Function server-side to avoid CORS blocks
+  const query = new URLSearchParams({path, ...params}).toString();
+  try{const r=await fetch(`/.netlify/functions/finnhub?${query}`);return r.ok?r.json():null;}catch{return null;}
+}
+const getQuote   = (t,k)=>fhFetch("/api/v1/quote",{symbol:t,token:k});
+const getProfile = (t,k)=>fhFetch("/api/v1/stock/profile2",{symbol:t,token:k});
+const getMetrics = (t,k)=>fhFetch("/api/v1/stock/metric",{symbol:t,metric:"all",token:k});
+const getNews    = (t,k)=>{const td=todayStr(),pd=new Date(Date.now()-7*86400000).toISOString().slice(0,10);return fhFetch("/api/v1/company-news",{symbol:t,from:pd,to:td,token:k});}
+const getRec     = (t,k)=>fhFetch("/api/v1/stock/recommendation",{symbol:t,token:k});
 
 /* ─── AI STREAM ──────────────────────────────────────────────────────────── */
 async function streamAI(prompt,onChunk,maxTokens=1800){
