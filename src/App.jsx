@@ -623,15 +623,23 @@ async function fetchPolygonGEX(ticker,apiKey){
 
 /* ─── FINNHUB ────────────────────────────────────────────────────────────── */
 async function fhFetch(path,params){
-  const q=new URLSearchParams({path,...params}).toString();
-  try{const r=await fetch(`/.netlify/functions/finnhub?${q}`);return r.ok?r.json():null;}catch{return null;}
+  // Always route through Netlify function — server uses FINNHUB_API_KEY env var
+  // client token is fallback only
+  const clean={path};
+  Object.entries(params).forEach(([k,v])=>{if(v!=null&&v!=="null"&&v!=="undefined")clean[k]=v;});
+  const q=new URLSearchParams(clean).toString();
+  try{
+    const r=await fetch(`/.netlify/functions/finnhub?${q}`);
+    if(!r.ok){console.warn("Finnhub",path,"status",r.status);return null;}
+    return r.json();
+  }catch(e){console.warn("Finnhub fetch error:",e.message);return null;}
 }
 const getQuote  =(t,k)=>fhFetch("/api/v1/quote",{symbol:t,token:k});
 const getProfile=(t,k)=>fhFetch("/api/v1/stock/profile2",{symbol:t,token:k});
 const getMetrics=(t,k)=>fhFetch("/api/v1/stock/metric",{symbol:t,metric:"all",token:k});
 const getNews   =(t,k)=>{const td=todayStr(),pd=new Date(Date.now()-7*86400000).toISOString().slice(0,10);return fhFetch("/api/v1/company-news",{symbol:t,from:pd,to:td,token:k});};
 const getRec    =(t,k)=>fhFetch("/api/v1/stock/recommendation",{symbol:t,token:k});
-const getCandles=(t,r,from,to,k)=>fhFetch("/api/v1/stock/candle",{symbol:t,resolution:r,from,to,token:k});
+const getCandles=(t,r,from,to,k)=>fhFetch("/api/v1/stock/candle",{symbol:t,resolution:r,from:String(from),to:String(to),token:k||"demo"});
 
 /* ─── AI CALLS ───────────────────────────────────────────────────────────── */
 async function callAI(body){
@@ -679,7 +687,7 @@ function PriceChart({sym,apiKey,price}){
   const [candles,setCandles]=useState(null);
 
   useEffect(()=>{
-    if(!sym||!apiKey)return;
+    if(!sym)return;
     setLoading(true);
     const now=Math.floor(Date.now()/1000);
     const configs={
@@ -690,7 +698,7 @@ function PriceChart({sym,apiKey,price}){
       "1Y":{res:"W",from:now-365*86400},
     };
     const {res,from}=configs[period];
-    getCandles(sym,res,from,now,apiKey).then(d=>{
+    getCandles(sym,res,from,now,apiKey||"demo").then(d=>{
       if(d?.s==="ok")setCandles(d);
       setLoading(false);
     });
@@ -894,7 +902,7 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
   const target3m      = techData?.target3m ?? null;
 
   useEffect(()=>{
-    if(!sym||!price)return;
+    if(!sym)return;
     const cached=cacheGet(sym);
     if(cached?.tech&&cached?.narrative1&&cached?.narrative2&&cached?.catalysts&&cached?.signals){
       if(!techData)   setTechData(cached.tech);
@@ -1567,30 +1575,32 @@ export default function App(){
   const pollingRef=useRef(null);
 
   const fetchStock=useCallback(async(sym,key)=>{
-    const k=key||apiKey;if(!k)return;
+    const k=key||apiKey||"demo"; // always attempt — server uses env key
     try{
-      const [quote,profile,metrics,news,rec]=await Promise.all([getQuote(sym,k),getProfile(sym,k),getMetrics(sym,k),getNews(sym,k),getRec(sym,k)]);
+      const [quote,profile,metrics,news,rec]=await Promise.all([
+        getQuote(sym,k),getProfile(sym,k),getMetrics(sym,k),getNews(sym,k),getRec(sym,k)
+      ]);
       setStockData(prev=>({...prev,[sym]:{quote,profile,metrics,news:(news||[]).slice(0,8),rec:(rec||[])[0]}}));
       if(quote)setQuotes(prev=>({...prev,[sym]:quote}));
-    }catch{}
+    }catch(e){console.warn("fetchStock error:",sym,e.message);}
   },[apiKey]);
 
   const fetchAll=useCallback(key=>{tickers.forEach(t=>fetchStock(t,key));},[tickers,fetchStock]);
 
   useEffect(()=>{
-    if(!apiKey)return;
-    fetchAll(apiKey);
-    pollingRef.current=setInterval(()=>fetchAll(apiKey),30000);
+    // Fetch regardless of whether user entered a key — server has FINNHUB_API_KEY
+    fetchAll(apiKey||"demo");
+    pollingRef.current=setInterval(()=>fetchAll(apiKey||"demo"),30000);
     return()=>clearInterval(pollingRef.current);
   },[apiKey,fetchAll]);
 
-  useEffect(()=>{if(apiKey&&selected)fetchStock(selected,apiKey);},[selected,apiKey]);
+  useEffect(()=>{fetchStock(selected,apiKey||"demo");},[selected,apiKey]);
 
   const addTicker=()=>{
     const t=input.trim().toUpperCase().slice(0,6);
     if(!t||tickers.includes(t)){setInput("");return;}
     setTickers(prev=>[...prev,t]);setInput("");setSelected(t);
-    if(apiKey)fetchStock(t,apiKey);
+    fetchStock(t,apiKey||"demo");
   };
 
   const isGex=view==="gex";
@@ -1637,7 +1647,7 @@ export default function App(){
                     <div key={sym}
                       className={`tr ${selected===sym&&view==="analysis"?"on":""}`}
                       onClick={()=>{setView("analysis");setSelected(sym);}}
-                      onMouseEnter={()=>{if(apiKey&&!stockData[sym])fetchStock(sym,apiKey);}}>
+                      onMouseEnter={()=>{if(!stockData[sym])fetchStock(sym,apiKey||"demo");}}>
                       <div className="tr-l">
                         <div className="tr-avatar">{sym.slice(0,4)}</div>
                         <div>

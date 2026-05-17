@@ -10,13 +10,19 @@ exports.handler = async function (event) {
     };
   }
 
-  // Rebuild the URL without double-encoding — pass params directly
-  const query = Object.entries(params)
+  // Use server-side key if set, otherwise fall through to client-provided token
+  const serverKey = process.env.FINNHUB_API_KEY;
+
+  const queryParams = Object.entries(params)
     .filter(([k]) => k !== "path")
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => {
+      // Replace client token with server token if available
+      if (k === "token" && serverKey) return `token=${serverKey}`;
+      return `${k}=${encodeURIComponent(v)}`;
+    })
     .join("&");
 
-  const url = `https://finnhub.io${path}${query ? "?" + query : ""}`;
+  const url = `https://finnhub.io${path}${queryParams ? "?" + queryParams : ""}`;
 
   try {
     const res = await fetch(url, {
@@ -29,7 +35,7 @@ exports.handler = async function (event) {
     const body = await res.text();
 
     if (!res.ok) {
-      console.error("Finnhub error:", res.status, url, body.slice(0, 200));
+      console.error("Finnhub error:", res.status, path, body.slice(0, 200));
     }
 
     return {
@@ -41,7 +47,7 @@ exports.handler = async function (event) {
       body,
     };
   } catch (e) {
-    console.error("Finnhub fetch error:", e.message);
+    console.error("Finnhub exception:", e.message);
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
