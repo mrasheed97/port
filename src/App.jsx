@@ -640,6 +640,14 @@ const getMetrics=(t,k)=>fhFetch("/api/v1/stock/metric",{symbol:t,metric:"all",to
 const getNews   =(t,k)=>{const td=todayStr(),pd=new Date(Date.now()-7*86400000).toISOString().slice(0,10);return fhFetch("/api/v1/company-news",{symbol:t,from:pd,to:td,token:k});};
 const getRec    =(t,k)=>fhFetch("/api/v1/stock/recommendation",{symbol:t,token:k});
 const getCandles=(t,r,from,to,k)=>fhFetch("/api/v1/stock/candle",{symbol:t,resolution:r,from:String(from),to:String(to),token:k||"demo"});
+// Yahoo chart — preferred, no key needed, intraday included
+async function getYahooChart(ticker,period){
+  try{
+    const r=await fetch(`/.netlify/functions/chart?ticker=${encodeURIComponent(ticker)}&period=${period}`);
+    if(r.ok){const d=await r.json();if(d.s==="ok"&&d.c?.length>0)return d;}
+  }catch(e){console.warn("Yahoo chart error:",e.message);}
+  return null;
+}
 
 /* ─── AI CALLS ───────────────────────────────────────────────────────────── */
 async function callAI(body){
@@ -680,7 +688,7 @@ async function callAIText(prompt,onChunk,maxTokens=1200){
 /* ═══════════════════════════════════════════════════════════════════════════
    PRICE CHART
 ═══════════════════════════════════════════════════════════════════════════ */
-function PriceChart({sym,apiKey,price}){
+function PriceChart({sym,price}){
   const canvasRef=useRef(null);
   const [period,setPeriod]=useState("1D");
   const [loading,setLoading]=useState(false);
@@ -690,38 +698,12 @@ function PriceChart({sym,apiKey,price}){
     if(!sym)return;
     setLoading(true);
     setCandles(null);
-    const now=Math.floor(Date.now()/1000);
-
-    // Always look back far enough to guarantee data even on weekends/holidays.
-    // For 1D we walk back up to 5 days to find the last trading session.
-    const configs={
-      "1D":{res:"5",  lookback:5},   // 5-min bars, search last 5 days
-      "1W":{res:"30", lookback:10},  // 30-min bars, search last 10 days
-      "1M":{res:"D",  lookback:35},  // daily bars, 35 days back
-      "3M":{res:"D",  lookback:100}, // daily bars, 100 days back
-      "1Y":{res:"W",  lookback:380}, // weekly bars, 380 days back
-    };
-    const {res,lookback}=configs[period];
-
-    // Try progressively wider windows until we get data
-    const tryFetch=async(daysBack)=>{
-      const from=now-(daysBack*86400);
-      const d=await getCandles(sym,res,from,now,apiKey||"demo");
-      if(d?.s==="ok"&&d.c?.length>0) return d;
-      return null;
-    };
-
     (async()=>{
-      // First try the natural window
-      let data=await tryFetch(lookback);
-      // If no data (weekend, holiday), double the lookback
-      if(!data) data=await tryFetch(lookback*2);
-      // Last resort: triple
-      if(!data) data=await tryFetch(lookback*3);
-      if(data) setCandles(data);
+      const d=await getYahooChart(sym,period);
+      if(d) setCandles(d);
       setLoading(false);
     })();
-  },[sym,period,apiKey]);
+  },[sym,period]);
 
   useEffect(()=>{
     if(!candles||!canvasRef.current)return;
@@ -1156,7 +1138,7 @@ Search for current ${sym} short interest, institutional 13F filings, earnings hi
 
       {/* ── PRICE CHART ── */}
       <div className="section">
-        <PriceChart sym={sym} apiKey={apiKey} price={price}/>
+        <PriceChart sym={sym} price={price}/>
       </div>
 
       {/* ── TECHNICAL DASHBOARD ── */}
