@@ -292,6 +292,16 @@ input{font-family:var(--mono);outline:none}
 .live-pill:hover{background:rgba(182,240,110,0.15)}
 .live-pill .dot{width:5px;height:5px;border-radius:50%;background:var(--g);animation:gpulse 2s ease-in-out infinite}
 
+/* ── SKELETON LOADING ── */
+@keyframes shimmer{0%{background-position:-400px 0}100%{background-position:400px 0}}
+.skel{border-radius:6px;background:linear-gradient(90deg,var(--ink3) 25%,var(--ink4) 50%,var(--ink3) 75%);background-size:400px 100%;animation:shimmer 1.4s ease-in-out infinite}
+.skel-text{height:12px;margin-bottom:8px;width:100%}
+.skel-text.w60{width:60%}
+.skel-text.w40{width:40%}
+.skel-text.w80{width:80%}
+.skel-block{height:80px;width:100%;border-radius:8px}
+.skel-circle{border-radius:50%;display:inline-block}
+
 `;
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
@@ -299,6 +309,7 @@ const DEFAULT_TICKERS = ["NVDA","RKLB","MU","META","FCEL"];
 const GEX_TICKERS    = ["SPY","QQQ","SPX","IWM","NVDA","AAPL","TSLA"];
 const ALLOC_COLORS   = ["#b6f06e","#6eb8f0","#f0c46e","#c06ef0","#f06e6e","#6ef0c4"];
 const REFRESH_MS     = 3*60*1000;
+const REFRESH_FAST   = 30*1000; // 30s rapid mode
 const K401_DEFAULT   = {
   total:125000,contributions:8400,ytdReturn:11.2,vested:125000,
   rothBalance:5800,sdbaBalance:25200,
@@ -317,6 +328,25 @@ const fmtG = n => { if(!n&&n!==0)return""; const a=Math.abs(n); if(a>=1e9)return
 const sign = n => n>0?"+":"";
 const todayStr  = () => new Date().toISOString().slice(0,10);
 const inDaysStr = d => { const t=new Date(); t.setDate(t.getDate()+d); return t.toISOString().slice(0,10); };
+
+
+/* ─── PERSISTENT CACHE ───────────────────────────────────────────────────── */
+const CACHE_VERSION = "v2";
+const CACHE_TTL_MS  = 4 * 60 * 60 * 1000; // 4 hours
+
+function cacheGet(sym) {
+  try {
+    const raw = localStorage.getItem(`port_${CACHE_VERSION}_${sym}`);
+    if (!raw) return null;
+    const {data, ts} = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_TTL_MS) { localStorage.removeItem(`port_${CACHE_VERSION}_${sym}`); return null; }
+    return data;
+  } catch { return null; }
+}
+
+function cacheSet(sym, data) {
+  try { localStorage.setItem(`port_${CACHE_VERSION}_${sym}`, JSON.stringify({data, ts: Date.now()})); } catch {}
+}
 
 /* ─── BLACK-SCHOLES ──────────────────────────────────────────────────────── */
 function normPDF(x){ return Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI); }
@@ -367,7 +397,13 @@ function generateDemoData(ticker,liveSpot){
     }
   }
   const dominant=rows.slice().sort((a,b)=>Math.abs(b.netGEX)-Math.abs(a.netGEX))[0]?.strike;
-  return{spot,strikes:rows,expiries,callWall,putWall,flipStrike,dominant,totalGEX,isPositive:totalGEX>0};
+  // Filter to high-volume strikes: keep top 40 by |netGEX| + always include spot±2
+  const sorted=[...rows].sort((a,b)=>Math.abs(b.netGEX)-Math.abs(a.netGEX));
+  const topSet=new Set(sorted.slice(0,40).map(r=>r.strike));
+  // Always include spot and immediate neighbours
+  rows.forEach(r=>{if(Math.abs(r.strike-spot)<=2)topSet.add(r.strike);});
+  const filteredRows=rows.filter(r=>topSet.has(r.strike));
+  return{spot,strikes:filteredRows,expiries,callWall,putWall,flipStrike,dominant,totalGEX,isPositive:totalGEX>0};
 }
 
 /* ─── POLYGON GEX ────────────────────────────────────────────────────────── */
@@ -401,7 +437,11 @@ async function fetchPolygonGEX(ticker,apiKey){
     }
   }
   const dominant=rows.slice().sort((a,b)=>Math.abs(b.netGEX)-Math.abs(a.netGEX))[0]?.strike;
-  return{spot,strikes:rows,expiries,callWall,putWall,flipStrike,dominant,totalGEX,isPositive:totalGEX>0};
+  const sortedP=[...rows].sort((a,b)=>Math.abs(b.netGEX)-Math.abs(a.netGEX));
+  const topSetP=new Set(sortedP.slice(0,40).map(r=>r.strike));
+  rows.forEach(r=>{if(Math.abs(r.strike-spot)<=2)topSetP.add(r.strike);});
+  const filteredRowsP=rows.filter(r=>topSetP.has(r.strike));
+  return{spot,strikes:filteredRowsP,expiries,callWall,putWall,flipStrike,dominant,totalGEX,isPositive:totalGEX>0};
 }
 
 /* ─── FINNHUB ────────────────────────────────────────────────────────────── */
@@ -579,10 +619,11 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
   const sd=stockData[sym];
   const q=sd?.quote,p=sd?.profile,m=sd?.metrics?.metric,news=sd?.news||[],rec=sd?.rec;
 
-  // AI state
-  const [narrative,setNarrative]=useState(aiCache[sym]?.narrative||"");
-  const [techData,setTechData]  =useState(aiCache[sym]?.tech||null);
-  const [catalysts,setCatalysts]=useState(aiCache[sym]?.catalysts||null);
+  // AI state — seed from localStorage cache for instant display on ticker switch
+  const lsCache = cacheGet(sym);
+  const [narrative,setNarrative]=useState(aiCache[sym]?.narrative||lsCache?.narrative||"");
+  const [techData,setTechData]  =useState(aiCache[sym]?.tech||lsCache?.tech||null);
+  const [catalysts,setCatalysts]=useState(aiCache[sym]?.catalysts||lsCache?.catalysts||null);
   const [narLoading,setNarLoading]=useState(false);
   const [techLoading,setTechLoading]=useState(false);
   const [catLoading,setCatLoading]=useState(false);
@@ -615,70 +656,61 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
 
   useEffect(()=>{
     if(!sym)return;
-    // Wait for Finnhub price data before firing AI — avoids "unknown" price context
     if(!price&&!aiCache[sym]?.tech)return;
-    // load tech data via JSON AI
-    if(!loaded.current[`${sym}_tech`]&&!techData){
-      loaded.current[`${sym}_tech`]=true;
-      setTechLoading(true);
-      const mp=m?`P/E:${m.peBasicExclExtraTTM?.toFixed(1)}, GrossMargin:${m.grossMarginTTM?.toFixed(1)}%, ROE:${m.roeTTM?.toFixed(1)}%, RevGrowth3Y:${m.revenueGrowth3Y?.toFixed(1)}%, Beta:${m.beta?.toFixed(2)}, 52wH:${wkHigh}, 52wL:${wkLow}`:"no fundamentals available";
-      const rp=rec?`Buy:${rec.buy}, Hold:${rec.hold}, Sell:${rec.sell}, StrongBuy:${rec.strongBuy}`:"no rec data";
-      callAIJSON(`You are a quantitative analyst. For stock ${sym} (current price: $${price?.toFixed(2)||"unknown"}), return ONLY valid JSON with these exact fields:
-{
-  "rsi": <number 0-100 estimated from recent price action>,
-  "maScore": <number 0-100, 100=all MAs bullish>,
-  "momentumScore": <number 0-100 overall momentum>,
-  "maDevs": [{"name":"20d","pct":<deviation % from 20d SMA>},{"name":"50d","pct":<deviation %>},{"name":"200d","pct":<deviation %>}],
-  "macdHist": [<array of 20 recent MACD histogram values, positive=bullish>],
-  "srLevels": [{"type":"resistance","price":<num>,"note":"<string>"},{"type":"support","price":<num>,"note":"<string>"},{"type":"resistance","price":<num>,"note":"<string>"},{"type":"support","price":<num>,"note":"<string>"}],
-  "scores": [<revenueGrowth 0-10>,<marginQuality 0-10>,<balanceSheet 0-10>,<earningsTraj 0-10>,<valuation 0-10>,<analystConviction 0-10>],
-  "scenarios": {
-    "bull":{"target":<price>,"assumption":"<1 sentence>"},
-    "base":{"target":<price>,"assumption":"<1 sentence>"},
-    "bear":{"target":<price>,"assumption":"<1 sentence>"}
-  },
-  "entry": "<price range string>",
-  "stop": "<price string>",
-  "target3m": "<price string>"
-}
-Fundamentals context: ${mp}. Analyst rec: ${rp}. Search for latest ${sym} technical analysis and price targets to inform your estimates. Return ONLY the JSON object, no markdown, no explanation.`)
-        .then(d=>{
-          if(d){setTechData(d);setAiCache(prev=>({...prev,[sym]:{...prev[sym],tech:d}}));}
-          setTechLoading(false);
-        });
+
+    const cached=cacheGet(sym);
+    if(cached){
+      if(cached.tech&&!techData){setTechData(cached.tech);setAiCache(prev=>({...prev,[sym]:{...prev[sym],tech:cached.tech}}));}
+      if(cached.narrative&&!narrative){setNarrative(cached.narrative);setAiCache(prev=>({...prev,[sym]:{...prev[sym],narrative:cached.narrative}}));}
+      if(cached.catalysts&&!catalysts){setCatalysts(cached.catalysts);setAiCache(prev=>({...prev,[sym]:{...prev[sym],catalysts:cached.catalysts}}));}
+      return;
     }
-    // narrative
-    if(!loaded.current[`${sym}_nar`]&&!narrative){
-      loaded.current[`${sym}_nar`]=true;
-      setNarLoading(true);
-      streamAI(`You are a senior equity analyst writing an institutional research note on ${sym}. Write exactly 4 paragraphs separated by blank lines, no headers, no bullet points, no markdown:
 
-Paragraph 1 — WHAT'S DRIVING IT: What is moving this stock right now? Search for the latest news, catalysts, and macro context. Be specific about dates and events.
+    const needTech=!loaded.current[`${sym}_tech`]&&!techData;
+    const needNar =!loaded.current[`${sym}_nar`]&&!narrative;
+    const needCat =!loaded.current[`${sym}_cat`]&&!catalysts;
 
-Paragraph 2 — BULL CASE: The strongest bull case with 2-3 specific upcoming catalysts, dates if known, and what they could mean for the stock.
+    if(!needTech&&!needNar&&!needCat)return;
 
-Paragraph 3 — BEAR CASE: The 3 biggest risks ranked by probability. Be direct and specific — name the actual risks, not generic disclaimers.
+    loaded.current[`${sym}_tech`]=true;
+    loaded.current[`${sym}_nar`]=true;
+    loaded.current[`${sym}_cat`]=true;
 
-Paragraph 4 — VERDICT: A clear directional call. State whether you'd buy, hold, or avoid here. Give a specific suggested entry price zone, a stop-loss level, and a 3-month price target with reasoning. Sign off with the date of your analysis.
+    if(needTech)setTechLoading(true);
+    if(needNar) setNarLoading(true);
+    if(needCat) setCatLoading(true);
 
-Current price: $${price?.toFixed(2)||"unknown"}. Write like a $50k/year Bloomberg terminal research note.`,
-        t=>{setNarrative(t);},2000)
-        .then(t=>{setNarLoading(false);setAiCache(prev=>({...prev,[sym]:{...prev[sym],narrative:t}}));});
-    }
-    // catalysts
-    if(!loaded.current[`${sym}_cat`]&&!catalysts){
-      loaded.current[`${sym}_cat`]=true;
-      setCatLoading(true);
-      callAIJSON(`Search for upcoming catalysts and events for ${sym} stock. Return ONLY valid JSON array (no markdown):
-[{"date":"<YYYY-MM-DD or month>","title":"<event name>","tag":"bull|bear|neut","detail":"<one sentence>"}]
-Include: earnings date, product launches, regulatory decisions, contract announcements, macro events. Maximum 6 items. Search for current information.`)
-        .then(d=>{
-          if(Array.isArray(d))setCatalysts(d);
-          setAiCache(prev=>({...prev,[sym]:{...prev[sym],catalysts:d}}));
-          setCatLoading(false);
-        });
-    }
-  },[sym,price]);;
+    const mp=m?`P/E:${m.peBasicExclExtraTTM?.toFixed(1)}, GrossMargin:${m.grossMarginTTM?.toFixed(1)}%, ROE:${m.roeTTM?.toFixed(1)}%, Beta:${m.beta?.toFixed(2)}, 52wH:${wkHigh}, 52wL:${wkLow}`:"no fundamentals";
+    const rp=rec?`Buy:${rec.buy}, Hold:${rec.hold}, Sell:${rec.sell}, StrongBuy:${rec.strongBuy}`:"no rec";
+
+    const techPromise = needTech ? callAIJSON(
+      `Quantitative analyst. Stock ${sym} price $${price?.toFixed(2)||"unknown"}. Return ONLY valid JSON, no markdown:
+{"rsi":<0-100>,"maScore":<0-100>,"momentumScore":<0-100>,"maDevs":[{"name":"20d","pct":<num>},{"name":"50d","pct":<num>},{"name":"200d","pct":<num>}],"macdHist":[<20 numbers>],"srLevels":[{"type":"resistance","price":<num>,"note":"<str>"},{"type":"support","price":<num>,"note":"<str>"},{"type":"resistance","price":<num>,"note":"<str>"},{"type":"support","price":<num>,"note":"<str>"}],"scores":[<6 numbers 0-10>],"scenarios":{"bull":{"target":<num>,"assumption":"<str>"},"base":{"target":<num>,"assumption":"<str>"},"bear":{"target":<num>,"assumption":"<str>"}},"entry":"<str>","stop":"<str>","target3m":"<str>"}
+Fundamentals: ${mp}. Recs: ${rp}. Search latest ${sym} technicals.`) : Promise.resolve(null);
+
+    const narPromise = needNar ? streamAI(
+      `Senior equity analyst research note on ${sym} (price $${price?.toFixed(2)||"unknown"}). 4 paragraphs, no headers, no bullets:
+Para 1: What is driving this stock RIGHT NOW — specific recent news and dates.
+Para 2: Bull case — 2-3 specific upcoming catalysts with dates.
+Para 3: Bear case — 3 risks ranked by probability, be specific.
+Para 4: Verdict — buy/hold/avoid, entry zone, stop, 3-month target with reasoning.`,
+      t=>{setNarrative(t);}, 1600) : Promise.resolve("");
+
+    const catPromise = needCat ? callAIJSON(
+      `Upcoming catalysts for ${sym}. Return ONLY JSON array, no markdown:
+[{"date":"<YYYY-MM-DD>","title":"<str>","tag":"bull|bear|neut","detail":"<1 sentence>"}]
+Max 5 items. Include earnings, product launches, regulatory events. Search current info.`) : Promise.resolve(null);
+
+    Promise.all([techPromise, narPromise, catPromise]).then(([tech, nar, cat])=>{
+      const update={};
+      if(tech){setTechData(tech);update.tech=tech;}
+      if(nar) {update.narrative=nar;}
+      if(cat&&Array.isArray(cat)){setCatalysts(cat);update.catalysts=cat;}
+      setAiCache(prev=>({...prev,[sym]:{...prev[sym],...update}}));
+      cacheSet(sym,{...aiCache[sym],...update});
+      setTechLoading(false);setNarLoading(false);setCatLoading(false);
+    });
+  },[sym,price]);
 
   const priceFmt = price?`$${price.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:"—";
 
@@ -735,8 +767,15 @@ Include: earnings date, product launches, regulatory decisions, contract announc
         <div className="sec-title">Technical Dashboard</div>
       </div>
       {techLoading&&!techData?(
-        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,padding:"32px 28px",color:"var(--sub)",fontSize:11}}>
-          <div className="spin"/><span>Computing technical indicators…</span>
+        <div className="rp-grid" style={{gridTemplateColumns:"200px 1fr 200px",paddingTop:0}}>
+          {[0,1,2].map(i=>(
+            <div key={i} className="rp-card" style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div className="skel skel-text w40"/>
+              <div className="skel skel-block"/>
+              <div className="skel skel-text w80"/>
+              <div className="skel skel-text w60"/>
+            </div>
+          ))}
         </div>
       ):(
         <div className="rp-grid" style={{gridTemplateColumns:"200px 1fr 200px"}}>
@@ -854,8 +893,10 @@ Include: earnings date, product launches, regulatory decisions, contract announc
       </div>
       <div className="narrative-wrap">
         {narLoading&&!narrative&&(
-          <div style={{display:"flex",alignItems:"center",gap:12,color:"var(--sub)",fontSize:11}}>
-            <div className="spin"/><span>Writing research note…</span>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {[100,85,92,70,88,60].map((w,i)=>(
+              <div key={i} className="skel skel-text" style={{width:`${w}%`,height:13}}/>
+            ))}
           </div>
         )}
         {narrative&&(
@@ -896,8 +937,14 @@ Include: earnings date, product launches, regulatory decisions, contract announc
       <div style={{padding:"0 28px"}}>
         <div className="rp-card">
           {catLoading&&!catalysts&&(
-            <div style={{display:"flex",alignItems:"center",gap:12,color:"var(--sub)",fontSize:11}}>
-              <div className="spin"/><span>Searching for upcoming catalysts…</span>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {[0,1,2].map(i=>(
+                <div key={i} style={{display:"flex",gap:10,alignItems:"center"}}>
+                  <div className="skel" style={{width:60,height:12,borderRadius:4}}/>
+                  <div className="skel skel-circle" style={{width:8,height:8,flexShrink:0}}/>
+                  <div className="skel" style={{flex:1,height:12,borderRadius:4}}/>
+                </div>
+              ))}
             </div>
           )}
           {catalysts&&catalysts.map((c,i)=>(
@@ -1076,6 +1123,7 @@ function GexDashboard(){
   const [manualSpot,setManualSpot]=useState({});
   const [lastRefresh,setLastRefresh]=useState(null);
   const [showSettings,setShowSettings]=useState(false);
+  const [rapidRefresh,setRapidRefresh]=useState(false);
   const timerRef=useRef(null);
   // Intraday replay state
   const [replayMode,setReplayMode]=useState(false);
@@ -1138,9 +1186,9 @@ function GexDashboard(){
   useEffect(()=>{
     load(ticker,demoMode,polyKey,manualSpot);
     clearInterval(timerRef.current);
-    timerRef.current=setInterval(()=>load(ticker,demoMode,polyKey,manualSpot),REFRESH_MS);
+    timerRef.current=setInterval(()=>load(ticker,demoMode,polyKey,manualSpot),rapidRefresh?REFRESH_FAST:REFRESH_MS);
     return()=>clearInterval(timerRef.current);
-  },[ticker,demoMode,polyKey,manualSpot]);
+  },[ticker,demoMode,polyKey,manualSpot,rapidRefresh]);
 
   const dotCls=loading?"loading":gexData?"live":"";
   const statusLabel=loading?"Computing…":lastRefresh?lastRefresh.toLocaleTimeString():"—";
@@ -1154,6 +1202,12 @@ function GexDashboard(){
         {spotLabel&&<span style={{fontSize:11,color:"var(--text)",fontWeight:500,letterSpacing:"-0.3px"}}>{spotLabel}</span>}
         <div className="gex-status"><div className={`gex-dot ${dotCls}`}/><span>{statusLabel}</span></div>
         <button className="gex-btn" onClick={()=>load(ticker,demoMode,polyKey,manualSpot)}>↺</button>
+        <button
+          className="gex-btn"
+          onClick={()=>setRapidRefresh(p=>!p)}
+          style={{color:rapidRefresh?"var(--g)":"var(--sub)",borderColor:rapidRefresh?"rgba(182,240,110,0.4)":"var(--line2)"}}
+          title={rapidRefresh?"Rapid refresh ON (30s) — click to slow down":"Click for rapid refresh every 30s"}
+        >{rapidRefresh?"⚡ 30s":"⚡"}</button>
         <button className="gex-btn" onClick={()=>setShowSettings(p=>!p)}>⚙ Settings</button>
       </div>
       {showSettings&&<GexSettings demoMode={demoMode} setDemoMode={setDemoMode} polyKey={polyKey} setPolyKey={setPolyKey} ticker={ticker} manualSpot={manualSpot} setManualSpot={setManualSpot} onClose={()=>setShowSettings(false)}/>}
@@ -1323,7 +1377,8 @@ export default function App(){
                   const qd=quotes[sym],chg=qd?qd.dp:null,pos=chg==null?null:chg>=0;
                   return(
                     <div key={sym} className={`ticker-row ${selected===sym&&view==="watch"?"on":""}`}
-                      onClick={()=>{setView("watch");setSelected(sym);}}>
+                      onClick={()=>{setView("watch");setSelected(sym);}}
+                      onMouseEnter={()=>{if(apiKey&&!stockData[sym])fetchStock(sym,apiKey);}}>
                       <div className="t-left">
                         <div className="t-icon">{sym.slice(0,4)}</div>
                         <div>
