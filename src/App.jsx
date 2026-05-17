@@ -683,25 +683,44 @@ async function callAIText(prompt,onChunk,maxTokens=1200){
 function PriceChart({sym,apiKey,price}){
   const canvasRef=useRef(null);
   const [period,setPeriod]=useState("1D");
-  const [loading,setLoading]=useState(true);
+  const [loading,setLoading]=useState(false);
   const [candles,setCandles]=useState(null);
 
   useEffect(()=>{
     if(!sym)return;
     setLoading(true);
+    setCandles(null);
     const now=Math.floor(Date.now()/1000);
+
+    // Always look back far enough to guarantee data even on weekends/holidays.
+    // For 1D we walk back up to 5 days to find the last trading session.
     const configs={
-      "1D":{res:"5",from:now-86400},
-      "1W":{res:"30",from:now-7*86400},
-      "1M":{res:"D",from:now-30*86400},
-      "3M":{res:"D",from:now-90*86400},
-      "1Y":{res:"W",from:now-365*86400},
+      "1D":{res:"5",  lookback:5},   // 5-min bars, search last 5 days
+      "1W":{res:"30", lookback:10},  // 30-min bars, search last 10 days
+      "1M":{res:"D",  lookback:35},  // daily bars, 35 days back
+      "3M":{res:"D",  lookback:100}, // daily bars, 100 days back
+      "1Y":{res:"W",  lookback:380}, // weekly bars, 380 days back
     };
-    const {res,from}=configs[period];
-    getCandles(sym,res,from,now,apiKey||"demo").then(d=>{
-      if(d?.s==="ok")setCandles(d);
+    const {res,lookback}=configs[period];
+
+    // Try progressively wider windows until we get data
+    const tryFetch=async(daysBack)=>{
+      const from=now-(daysBack*86400);
+      const d=await getCandles(sym,res,from,now,apiKey||"demo");
+      if(d?.s==="ok"&&d.c?.length>0) return d;
+      return null;
+    };
+
+    (async()=>{
+      // First try the natural window
+      let data=await tryFetch(lookback);
+      // If no data (weekend, holiday), double the lookback
+      if(!data) data=await tryFetch(lookback*2);
+      // Last resort: triple
+      if(!data) data=await tryFetch(lookback*3);
+      if(data) setCandles(data);
       setLoading(false);
-    });
+    })();
   },[sym,period,apiKey]);
 
   useEffect(()=>{
@@ -759,7 +778,7 @@ function PriceChart({sym,apiKey,price}){
       </div>
       <div className="chart-wrap" style={{height:180}}>
         {loading&&<div className="chart-loading"><div className="spin"/><span>Loading chart…</span></div>}
-        {!loading&&!candles&&<div className="chart-loading" style={{color:"var(--t3)"}}>Add Finnhub key for live chart</div>}
+        {!loading&&!candles&&<div className="chart-loading" style={{color:"var(--t3)"}}>No chart data available</div>}
         <canvas ref={canvasRef} className="chart-canvas" style={{width:"100%",height:"100%",display:loading||!candles?"none":"block"}}/>
       </div>
     </div>
@@ -903,45 +922,46 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
 
   useEffect(()=>{
     if(!sym)return;
+    // Load from cache instantly
     const cached=cacheGet(sym);
-    if(cached?.tech&&cached?.narrative1&&cached?.narrative2&&cached?.catalysts&&cached?.signals){
-      if(!techData)   setTechData(cached.tech);
-      if(!narrative1) setNarrative1(cached.narrative1);
-      if(!narrative2) setNarrative2(cached.narrative2);
-      if(!catalysts)  setCatalysts(cached.catalysts);
-      if(!signals)    setSignals(cached.signals);
-      return;
-    }
+    if(cached?.tech&&!techData)   setTechData(cached.tech);
+    if(cached?.narrative1&&!narrative1) setNarrative1(cached.narrative1);
+    if(cached?.narrative2&&!narrative2) setNarrative2(cached.narrative2);
+    if(cached?.catalysts&&!catalysts)  setCatalysts(cached.catalysts);
+    if(cached?.signals&&!signals)    setSignals(cached.signals);
+    // If fully cached skip AI calls
+    if(cached?.tech&&cached?.narrative1&&cached?.narrative2&&cached?.catalysts&&cached?.signals) return;
 
-    const mp=m?`P/E:${m.peBasicExclExtraTTM?.toFixed(1)},GM:${m.grossMarginTTM?.toFixed(1)}%,ROE:${m.roeTTM?.toFixed(1)}%,Beta:${m.beta?.toFixed(2)},52wH:${wkHigh},52wL:${wkLow}`:"no fundamentals";
+    const priceStr=price?.toFixed(2)||"unknown";
+    const mp=m?`P/E:${m.peBasicExclExtraTTM?.toFixed(1)},GM:${m.grossMarginTTM?.toFixed(1)}%,Beta:${m.beta?.toFixed(2)},52wH:${wkHigh},52wL:${wkLow}`:"no fundamentals";
     const rp=rec?`StrongBuy:${rec.strongBuy},Buy:${rec.buy},Hold:${rec.hold},Sell:${rec.sell}`:"no rec";
 
-    // All 5 calls fire in parallel
-    if(!loaded.current[`${sym}_tech`]&&!techData){
+    // Only mark loaded and fire if not already running
+    if(!loaded.current[`${sym}_tech`]&&!techData&&!(cached?.tech)){
       loaded.current[`${sym}_tech`]=true; setTechLoading(true);
-      callAIJSON(`Quant analyst. ${sym} at $${price?.toFixed(2)}. Return ONLY valid JSON no markdown:
+      callAIJSON(`Quant analyst. ${sym} at $${priceStr}. Return ONLY valid JSON no markdown:
 {"rsi":<0-100>,"maScore":<0-100>,"momentumScore":<0-100>,"maDevs":[{"name":"20d","pct":<num>},{"name":"50d","pct":<num>},{"name":"200d","pct":<num>}],"macdHist":[<20 nums>],"srLevels":[{"type":"resistance","price":<num>,"note":"<str>"},{"type":"support","price":<num>,"note":"<str>"},{"type":"resistance","price":<num>,"note":"<str>"},{"type":"support","price":<num>,"note":"<str>"}],"scores":[<6 nums 0-10>],"scenarios":{"bull":{"target":<num>,"assumption":"<str>"},"base":{"target":<num>,"assumption":"<str>"},"bear":{"target":<num>,"assumption":"<str>"}},"entry":"<str>","stop":"<str>","target3m":"<str>"}
 Fundamentals: ${mp}. Recs: ${rp}. Search latest ${sym} technicals.`)
         .then(d=>{if(d){setTechData(d);updateCache(sym,"tech",d);}setTechLoading(false);});
     }
 
-    if(!loaded.current[`${sym}_nar1`]&&!narrative1){
+    if(!loaded.current[`${sym}_nar1`]&&!narrative1&&!(cached?.narrative1)){
       loaded.current[`${sym}_nar1`]=true; setNar1Loading(true);
       callAIText(
-        `Equity analyst research note on ${sym} at $${price?.toFixed(2)}. Write 2 paragraphs, no headers, no bullets:\nPara 1: What's driving this stock RIGHT NOW — specific recent news, catalysts, dates.\nPara 2: Bull case — 2-3 specific upcoming catalysts with dates and price implications.`,
+        `Equity analyst research note on ${sym} at $${priceStr}. Write 2 paragraphs, no headers, no bullets:\nPara 1: What's driving this stock RIGHT NOW — specific recent news, catalysts, dates.\nPara 2: Bull case — 2-3 specific upcoming catalysts with dates and price implications.`,
         t=>{setNarrative1(t);},900
       ).then(t=>{setNar1Loading(false);updateCache(sym,"narrative1",t);});
     }
 
-    if(!loaded.current[`${sym}_nar2`]&&!narrative2){
+    if(!loaded.current[`${sym}_nar2`]&&!narrative2&&!(cached?.narrative2)){
       loaded.current[`${sym}_nar2`]=true; setNar2Loading(true);
       callAIText(
-        `Equity analyst research note on ${sym} at $${price?.toFixed(2)}. Write 2 paragraphs, no headers, no bullets:\nPara 1: Bear case — 3 biggest risks ranked by probability, be specific.\nPara 2: Verdict — buy/hold/avoid, entry zone $X-Y, stop $Z, 3-month target $W with reasoning. Date: ${new Date().toLocaleDateString()}.`,
+        `Equity analyst research note on ${sym} at $${priceStr}. Write 2 paragraphs, no headers, no bullets:\nPara 1: Bear case — 3 biggest risks ranked by probability, be specific.\nPara 2: Verdict — buy/hold/avoid, entry zone $X-Y, stop $Z, 3-month target $W with reasoning. Date: ${new Date().toLocaleDateString()}.`,
         t=>{setNarrative2(t);},900
       ).then(t=>{setNar2Loading(false);updateCache(sym,"narrative2",t);});
     }
 
-    if(!loaded.current[`${sym}_cat`]&&!catalysts){
+    if(!loaded.current[`${sym}_cat`]&&!catalysts&&!(cached?.catalysts)){
       loaded.current[`${sym}_cat`]=true; setCatLoading(true);
       callAIJSON(`Upcoming catalysts for ${sym}. Return ONLY JSON array no markdown:
 [{"date":"<YYYY-MM-DD>","title":"<str>","tag":"bull|bear|neut","detail":"<1 sentence>"}]
@@ -949,9 +969,9 @@ Max 5 items. Include earnings, product launches, regulatory events.`)
         .then(d=>{if(Array.isArray(d)){setCatalysts(d);updateCache(sym,"catalysts",d);}setCatLoading(false);});
     }
 
-    if(!loaded.current[`${sym}_sig`]&&!signals){
+    if(!loaded.current[`${sym}_sig`]&&!signals&&!(cached?.signals)){
       loaded.current[`${sym}_sig`]=true; setSigLoading(true);
-      callAIJSON(`For ${sym} at $${price?.toFixed(2)}, return ONLY JSON no markdown:
+      callAIJSON(`For ${sym} at $${priceStr}, return ONLY JSON no markdown:
 {"shortInterest":{"pct":<float>,"daysTocover":<float>,"borrowRate":<float>,"squeezeScore":<0-100>},"relativeStrength":[{"period":"5d","vs_spy":<float>},{"period":"20d","vs_spy":<float>},{"period":"60d","vs_spy":<float>},{"period":"YTD","vs_spy":<float>},{"period":"1Y","vs_spy":<float>}],"earningsHistory":[{"date":"<str>","beat":"beat|miss|inline","epsEst":<float>,"epsActual":<float>,"impliedMove":<float>,"actualMove":<float>}],"institutions":[{"name":"<fund>","action":"add|reduce|new","shares":<int>,"pctChange":<float>}]}
 Search for current ${sym} short interest, institutional 13F filings, earnings history. Max 5 institutions, 6 earnings quarters.`)
         .then(d=>{if(d){setSignals(d);updateCache(sym,"signals",d);}setSigLoading(false);});
@@ -1563,7 +1583,7 @@ function SetupModal({onSave,onSkip}){
 export default function App(){
   const [view,setView]          =useState("analysis");
   const [apiKey,setApiKey]      =useState(null);
-  const [showSetup,setShowSetup]=useState(true);
+  const [showSetup,setShowSetup]=useState(false);
   const [tickers,setTickers]    =useState(DEFAULT_TICKERS);
   const [selected,setSelected]  =useState("NVDA");
   const [quotes,setQuotes]      =useState({});
@@ -1682,7 +1702,7 @@ export default function App(){
             )}
 
             {view==="analysis"&&selected&&(
-              <ResearchPage sym={selected} stockData={stockData} apiKey={apiKey} aiCache={aiCache} setAiCache={setAiCache}/>
+              <ResearchPage key={selected} sym={selected} stockData={stockData} apiKey={apiKey} aiCache={aiCache} setAiCache={setAiCache}/>
             )}
 
             {view==="manage"&&(
