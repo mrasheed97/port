@@ -400,30 +400,59 @@ const getRec     = (t,k)=>fhFetch("/api/v1/stock/recommendation",{symbol:t,token
 
 /* ─── AI STREAM ──────────────────────────────────────────────────────────── */
 async function streamAI(prompt,onChunk,maxTokens=1800){
-  // Netlify Functions don't support true streaming — we simulate it by
-  // fetching the full response then revealing text word-by-word for the UX feel
-  onChunk("Researching " + prompt.slice(0,40).split("\n")[0] + "…");
-  const res=await fetch("/.netlify/functions/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,stream:false,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})});
-  const data=await res.json();
-  const full=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-  // Simulate streaming word by word for the typewriter effect
-  const words=full.split(" ");
-  let built="";
-  for(let i=0;i<words.length;i++){
-    built+=( i===0?"": " ")+words[i];
-    if(i%8===0)onChunk(built);
-    await new Promise(r=>setTimeout(r,18));
+  onChunk("Analyzing… (this takes 15–20 seconds)");
+  try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),24000);
+    const res=await fetch("/.netlify/functions/ai",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      signal:controller.signal,
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,stream:false,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
+    });
+    clearTimeout(timeout);
+    if(!res.ok){onChunk("Analysis unavailable — API error "+res.status);return "";}
+    const data=await res.json();
+    if(data.error){onChunk("Analysis unavailable: "+data.error);return "";}
+    const full=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
+    if(!full){onChunk("No response returned.");return "";}
+    // Typewriter reveal
+    const words=full.split(" ");let built="";
+    for(let i=0;i<words.length;i++){
+      built+=(i===0?"": " ")+words[i];
+      if(i%6===0)onChunk(built);
+      await new Promise(r=>setTimeout(r,14));
+    }
+    onChunk(full);
+    return full;
+  }catch(e){
+    const msg=e.name==="AbortError"?"Analysis timed out — try again":"Analysis failed: "+e.message;
+    onChunk(msg);return "";
   }
-  onChunk(full);
-  return full;
 }
 
 /* ─── JSON AI CALL ───────────────────────────────────────────────────────── */
 async function callAIJSON(prompt){
-  const res=await fetch("/.netlify/functions/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})});
-  const data=await res.json();
-  const text=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-  try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch{return null;}
+  try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),24000);
+    const res=await fetch("/.netlify/functions/ai",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      signal:controller.signal,
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
+    });
+    clearTimeout(timeout);
+    if(!res.ok){console.error("AI function error:",res.status);return null;}
+    const data=await res.json();
+    if(data.error){console.error("AI error:",data.error);return null;}
+    const text=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
+    try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch(e){console.error("JSON parse failed:",e,text.slice(0,200));return null;}
+  }catch(e){
+    if(e.name==="AbortError")console.error("AI call timed out");
+    else console.error("AI call failed:",e.message);
+    return null;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
