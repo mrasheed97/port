@@ -502,8 +502,8 @@ const GEX_TICKERS = ["SPY","QQQ","SPX","IWM","NVDA","AAPL","TSLA"];
 const ALLOC_COLORS = ["#4f8bff","#3dd68c","#f5c542","#d966ff","#f0566e","#22e5d4"];
 const REFRESH_MS  = 3*60*1000;
 const REFRESH_FAST= 30*1000;
-const CACHE_TTL   = 4*60*60*1000; // 4h
-const CACHE_VER   = "v3";
+const CACHE_TTL   = 30*60*1000; // 30 minutes
+const CACHE_VER   = "v4"; // bumped to bust stale v3 cache
 const K401_DEFAULT = {
   total:125000, contributions:8400, ytdReturn:11.2, vested:125000,
   rothBalance:5800, sdbaBalance:25200,
@@ -861,7 +861,7 @@ function SectorHeatmap(){
 /* ═══════════════════════════════════════════════════════════════════════════
    RESEARCH PAGE
 ═══════════════════════════════════════════════════════════════════════════ */
-function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
+function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache,refreshKey}){
   const sd    = stockData[sym];
   const q     = sd?.quote;
   const p     = sd?.profile;
@@ -889,6 +889,19 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
   const [catLoading, setCatLoading ] = useState(false);
   const [sigLoading, setSigLoading ] = useState(false);
   const loaded = useRef({});
+  const [isRefreshing,setIsRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(()=>{
+    // Clear localStorage cache for this ticker
+    try{ localStorage.removeItem(`port_${CACHE_VER}_${sym}`); }catch{}
+    // Clear aiCache in memory
+    setAiCache(p=>({...p,[sym]:{}}));
+    // Reset all local state
+    setTechData(null);setNarrative1("");setNarrative2("");setCatalysts(null);setSignals(null);
+    // Reset loaded guards so effect re-fires
+    loaded.current={};
+    setIsRefreshing(p=>!p); // toggle to trigger re-render
+  },[sym,setAiCache]);
 
   const momentumScore = techData?.momentumScore ?? null;
   const signalStr     = momentumScore==null?"—":momentumScore>=60?"Bullish":momentumScore<=40?"Bearish":"Neutral";
@@ -958,7 +971,7 @@ Max 5 items. Include earnings, product launches, regulatory events.`)
 Search for current ${sym} short interest, institutional 13F filings, earnings history. Max 5 institutions, 6 earnings quarters.`)
         .then(d=>{if(d){setSignals(d);updateCache(sym,"signals",d);}setSigLoading(false);});
     }
-  },[sym,price]);
+  },[sym,price,isRefreshing]);
 
   function updateCache(sym,key,val){
     const prev=cacheGet(sym)||{};
@@ -1099,9 +1112,25 @@ Search for current ${sym} short interest, institutional 13F filings, earnings hi
           <div className="hero-right">
             <div className="hero-price" style={{color:chgPct==null?"var(--t1)":chgPct>=0?"var(--green)":"var(--red)"}}>{priceFmt}</div>
             {chg!=null&&<span className={`hero-chg ${chgPct>=0?"pos":"neg"}`}>{sign(chg)}{fmt(chg,"$")} ({sign(chgPct)}{fmt(chgPct,"","%")})</span>}
-            <div className={`signal-pill ${signalCls}`}>
-              {signalStr==="Bullish"?"▲ ":signalStr==="Bearish"?"▼ ":"— "}{signalStr}
-              {momentumScore!=null&&<span style={{opacity:.7,fontSize:10}}>· {momentumScore}/100</span>}
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div className={`signal-pill ${signalCls}`}>
+                {signalStr==="Bullish"?"▲ ":signalStr==="Bearish"?"▼ ":"— "}{signalStr}
+                {momentumScore!=null&&<span style={{opacity:.7,fontSize:10}}>· {momentumScore}/100</span>}
+              </div>
+              <button
+                onClick={handleRefresh}
+                title="Refresh all data"
+                style={{
+                  fontSize:11,fontWeight:600,color:"var(--t2)",
+                  background:"var(--s2)",border:"1px solid var(--b2)",
+                  borderRadius:8,padding:"5px 12px",cursor:"pointer",
+                  transition:"all .15s",display:"flex",alignItems:"center",gap:5
+                }}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--blue)";e.currentTarget.style.color="var(--blue)";}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--b2)";e.currentTarget.style.color="var(--t2)";}}
+              >
+                ↺ Refresh
+              </button>
             </div>
             <div className="hero-time">{new Date().toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</div>
           </div>
@@ -1684,7 +1713,7 @@ export default function App(){
             )}
 
             {view==="analysis"&&selected&&(
-              <ResearchPage key={selected} sym={selected} stockData={stockData} apiKey={apiKey} aiCache={aiCache} setAiCache={setAiCache}/>
+              <ResearchPage key={selected} sym={selected} stockData={stockData} apiKey={apiKey} aiCache={aiCache} setAiCache={setAiCache} refreshKey={selected}/>
             )}
 
             {view==="manage"&&(
