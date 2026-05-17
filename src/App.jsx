@@ -275,6 +275,23 @@ input{font-family:var(--mono);outline:none}
 .toggle.on{background:var(--g)}
 .toggle-knob{width:14px;height:14px;border-radius:50%;background:var(--ink);position:absolute;top:2px;left:2px;transition:left .2s}
 .toggle.on .toggle-knob{left:18px}
+
+/* ── INTRADAY REPLAY ── */
+.replay-bar{display:flex;align-items:center;gap:10px;padding:8px 16px;background:var(--ink2);border-bottom:1px solid var(--line);flex-shrink:0;flex-wrap:wrap}
+.replay-btn{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid var(--line2);color:var(--sub2);font-size:12px;transition:all .15s;flex-shrink:0}
+.replay-btn:hover{color:var(--text);border-color:var(--line2)}
+.replay-btn.active{background:var(--g);color:var(--ink);border-color:var(--g)}
+.replay-slider{flex:1;min-width:120px;height:3px;accent-color:var(--g);cursor:pointer}
+.replay-time{font-size:11px;color:var(--text);font-weight:500;width:52px;text-align:center;font-family:var(--mono)}
+.replay-date{font-size:10px;color:var(--sub);white-space:nowrap}
+.replay-speed-btn{font-size:10px;color:var(--sub);border:1px solid var(--line2);border-radius:4px;padding:2px 6px;transition:all .15s}
+.replay-speed-btn.on{background:var(--ink3);color:var(--text)}
+.replay-step-btn{font-size:10px;color:var(--sub);border:1px solid var(--line2);border-radius:4px;padding:2px 7px;transition:all .15s}
+.replay-step-btn.on{background:var(--ink3);color:var(--text)}
+.live-pill{display:flex;align-items:center;gap:4px;font-size:10px;padding:2px 8px;border-radius:20px;border:1px solid rgba(182,240,110,0.3);background:rgba(182,240,110,0.08);color:var(--g);cursor:pointer;transition:all .15s}
+.live-pill:hover{background:rgba(182,240,110,0.15)}
+.live-pill .dot{width:5px;height:5px;border-radius:50%;background:var(--g);animation:gpulse 2s ease-in-out infinite}
+
 `;
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
@@ -284,6 +301,7 @@ const ALLOC_COLORS   = ["#b6f06e","#6eb8f0","#f0c46e","#c06ef0","#f06e6e","#6ef0
 const REFRESH_MS     = 3*60*1000;
 const K401_DEFAULT   = {
   total:125000,contributions:8400,ytdReturn:11.2,vested:125000,
+  rothBalance:5800,sdbaBalance:25200,
   positions:[
     {name:"Vanguard S&P 500 Index",pct:55,val:68750},
     {name:"Vanguard Total Bond",pct:15,val:18750},
@@ -323,7 +341,7 @@ function generateDemoData(ticker,liveSpot){
   const fallbacks={SPY:580,QQQ:500,SPX:5800,IWM:210,NVDA:115,AAPL:200,TSLA:280};
   const vols={SPY:0.14,QQQ:0.18,SPX:0.14,IWM:0.20,NVDA:0.55,AAPL:0.28,TSLA:0.65};
   const spot=liveSpot||fallbacks[ticker]||400,vol=vols[ticker]||0.20;
-  const step=ticker==="SPX"?25:5;
+  const step=ticker==="SPX"?5:1;
   const expiries=[todayStr(),inDaysStr(7),inDaysStr(14)];
   const lo=Math.round(spot*0.96/step)*step,hi=Math.round(spot*1.04/step)*step;
   const strikes=[];for(let k=lo;k<=hi;k+=step)strikes.push(k);
@@ -408,7 +426,7 @@ async function streamAI(prompt,onChunk,maxTokens=1800){
       method:"POST",
       headers:{"Content-Type":"application/json"},
       signal:controller.signal,
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,stream:false,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
+      body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:maxTokens,stream:false,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
     });
     clearTimeout(timeout);
     if(!res.ok){onChunk("Analysis unavailable — API error "+res.status);return "";}
@@ -440,7 +458,7 @@ async function callAIJSON(prompt){
       method:"POST",
       headers:{"Content-Type":"application/json"},
       signal:controller.signal,
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
+      body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],messages:[{role:"user",content:prompt}]})
     });
     clearTimeout(timeout);
     if(!res.ok){console.error("AI function error:",res.status);return null;}
@@ -597,6 +615,8 @@ function ResearchPage({sym,stockData,apiKey,aiCache,setAiCache}){
 
   useEffect(()=>{
     if(!sym)return;
+    // Wait for Finnhub price data before firing AI — avoids "unknown" price context
+    if(!price&&!aiCache[sym]?.tech)return;
     // load tech data via JSON AI
     if(!loaded.current[`${sym}_tech`]&&!techData){
       loaded.current[`${sym}_tech`]=true;
@@ -658,7 +678,7 @@ Include: earnings date, product launches, regulatory decisions, contract announc
           setCatLoading(false);
         });
     }
-  },[sym]);
+  },[sym,price]);;
 
   const priceFmt = price?`$${price.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:"—";
 
@@ -1057,6 +1077,41 @@ function GexDashboard(){
   const [lastRefresh,setLastRefresh]=useState(null);
   const [showSettings,setShowSettings]=useState(false);
   const timerRef=useRef(null);
+  // Intraday replay state
+  const [replayMode,setReplayMode]=useState(false);
+  const [replayPlaying,setReplayPlaying]=useState(false);
+  const [replayStep,setReplayStep]=useState("15m");
+  const [replaySpeed,setReplaySpeed]=useState(1);
+  const [replayPos,setReplayPos]=useState(100); // 0-100 = market open to now
+  const [replayTime,setReplayTime]=useState(""); 
+  const replayRef=useRef(null);
+
+  // Generate replay time string from position 0-100
+  const posToTime=(pos)=>{
+    const open=9*60+30; // 9:30am
+    const close=16*60; // 4pm
+    const mins=Math.round(open+(close-open)*(pos/100));
+    const h=Math.floor(mins/60),m=mins%60;
+    const ampm=h>=12?"PM":"AM";
+    return `${h>12?h-12:h}:${m.toString().padStart(2,"0")} ${ampm}`;
+  };
+
+  // Replay tick
+  useEffect(()=>{
+    if(replayPlaying&&replayMode){
+      replayRef.current=setInterval(()=>{
+        setReplayPos(p=>{
+          if(p>=100){setReplayPlaying(false);return 100;}
+          return Math.min(100,p+0.5*replaySpeed);
+        });
+      },500);
+    } else {
+      clearInterval(replayRef.current);
+    }
+    return()=>clearInterval(replayRef.current);
+  },[replayPlaying,replayMode,replaySpeed]);
+
+  useEffect(()=>{setReplayTime(posToTime(replayPos));},[replayPos]);
 
   const load=useCallback(async(t,demo,pk,manSpots)=>{
     setLoading(true);setError(null);
@@ -1102,6 +1157,57 @@ function GexDashboard(){
         <button className="gex-btn" onClick={()=>setShowSettings(p=>!p)}>⚙ Settings</button>
       </div>
       {showSettings&&<GexSettings demoMode={demoMode} setDemoMode={setDemoMode} polyKey={polyKey} setPolyKey={setPolyKey} ticker={ticker} manualSpot={manualSpot} setManualSpot={setManualSpot} onClose={()=>setShowSettings(false)}/>}
+
+      {/* ── INTRADAY REPLAY BAR ── */}
+      <div className="replay-bar">
+        <div
+          className="live-pill"
+          onClick={()=>{setReplayMode(false);setReplayPos(100);setReplayPlaying(false);}}
+          style={{opacity:replayMode?0.5:1}}
+        >
+          <div className="dot"/>
+          LIVE
+        </div>
+        <button
+          className="replay-btn"
+          style={{fontSize:10,width:"auto",padding:"0 8px",gap:4,background:replayMode?"var(--ink3)":"none"}}
+          onClick={()=>{setReplayMode(p=>!p);setReplayPlaying(false);setReplayPos(0);}}
+        >
+          ⏮ {replayMode?"Exit Replay":"Historical Replay"}
+        </button>
+        {replayMode&&(
+          <>
+            <button className="replay-btn" onClick={()=>setReplayPos(p=>Math.max(0,p-2))}>‹</button>
+            <button
+              className={`replay-btn ${replayPlaying?"active":""}`}
+              onClick={()=>setReplayPlaying(p=>!p)}
+            >
+              {replayPlaying?"⏸":"▶"}
+            </button>
+            <button className="replay-btn" onClick={()=>setReplayPos(p=>Math.min(100,p+2))}>›</button>
+            <input
+              type="range" min="0" max="100" value={replayPos}
+              className="replay-slider"
+              onChange={e=>{ setReplayPos(Number(e.target.value)); setReplayPlaying(false); }}
+            />
+            <span className="replay-time">{replayTime}</span>
+            <span className="replay-date">
+              {new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}
+            </span>
+            <div style={{display:"flex",gap:3}}>
+              {["5m","15m","30m","1h"].map(s=>(
+                <button key={s} className={`replay-step-btn ${replayStep===s?"on":""}`} onClick={()=>setReplayStep(s)}>{s}</button>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:3}}>
+              {[0.5,1,2].map(sp=>(
+                <button key={sp} className={`replay-speed-btn ${replaySpeed===sp?"on":""}`} onClick={()=>setReplaySpeed(sp)}>{sp}x</button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
       <KeyLevels data={gexData}/>
       {error&&<div style={{padding:"8px 16px",fontSize:11,color:"var(--r)",borderBottom:"1px solid var(--line)",flexShrink:0}}>⚠ {error} — showing demo data.</div>}
       <div className="gex-body">
@@ -1192,7 +1298,7 @@ export default function App(){
         <nav className="nav">
           <div className="nav-logo">Port</div>
           <div className="nav-tabs">
-            {[["watch","Portfolio"],["gex","GEX Dashboard"],["k401","401k"]].map(([v,l])=>(
+            {[["watch","Analysis"],["gex","GEX Dashboard"],["k401","Manage"]].map(([v,l])=>(
               <button key={v} className={`nav-tab ${view===v?"on":""}`} onClick={()=>setView(v)}>{l}</button>
             ))}
           </div>
@@ -1256,32 +1362,108 @@ export default function App(){
 
             {view==="k401"&&(
               <div className="k-panel">
-                <div className="k-title">401k Overview</div>
+                <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:4}}>
+                  <div className="k-title">Manage</div>
+                  <button className="k-edit-btn" onClick={()=>setShowK401Edit(p=>!p)} style={{marginTop:8}}>
+                    {showK401Edit?"✓ Done editing":"✏ Edit all"}
+                  </button>
+                </div>
                 <div className="k-sub">Empower · {new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>
+
+                {/* ── SUMMARY CARDS ── */}
                 <div className="k-grid">
-                  {[{label:"Total Balance",val:fmtM(k401.total),sub:"All accounts",cls:""},
-                    {label:"Vested Balance",val:fmtM(k401.vested),sub:"Fully vested",cls:""},
-                    {label:"YTD Return",val:`+${k401.ytdReturn}%`,sub:"This year",cls:"g"},
-                    {label:"YTD Contributions",val:fmtM(k401.contributions),sub:"Employee + employer",cls:""}
+                  {[
+                    {label:"Total Balance",key:"total",sub:"All accounts",cls:"",prefix:"$",fmt:fmtM},
+                    {label:"Vested Balance",key:"vested",sub:"Fully vested",cls:"",prefix:"$",fmt:fmtM},
+                    {label:"YTD Return",key:"ytdReturn",sub:"This year",cls:"g",prefix:"",suffix:"%",fmt:v=>`+${v}%`},
+                    {label:"YTD Contributions",key:"contributions",sub:"Employee + employer",cls:"",prefix:"$",fmt:fmtM},
                   ].map((x,i)=>(
                     <div className="k-card" key={i}>
                       <div className="k-card-label">{x.label}</div>
-                      <div className={`k-card-val ${x.cls}`}>{x.val}</div>
+                      {showK401Edit?(
+                        <input
+                          className="setup-input"
+                          type="number"
+                          step="0.01"
+                          value={k401[x.key]}
+                          onChange={e=>setK401(prev=>({...prev,[x.key]:parseFloat(e.target.value)||0}))}
+                          style={{marginTop:4,fontSize:13,padding:"6px 8px"}}
+                        />
+                      ):(
+                        <div className={`k-card-val ${x.cls}`}>{x.fmt(k401[x.key])}</div>
+                      )}
                       <div className="k-card-sub">{x.sub}</div>
                     </div>
                   ))}
                 </div>
+
+                {/* ── ALLOCATION ── */}
                 <div className="k-alloc">
-                  <div className="k-alloc-title">Allocation</div>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                    <div className="k-alloc-title" style={{marginBottom:0}}>Allocation</div>
+                    {showK401Edit&&(
+                      <button className="k-edit-btn" onClick={()=>setK401(prev=>({...prev,
+                        positions:[...prev.positions,{name:"New Fund",pct:0,val:0}]
+                      }))}>+ Add position</button>
+                    )}
+                  </div>
                   {k401.positions.map((pos,i)=>(
-                    <div className="k-alloc-row" key={i}>
-                      <div className="k-alloc-name">{pos.name}</div>
-                      <div className="k-alloc-bar"><div className="k-alloc-fill" style={{width:`${pos.pct}%`,background:ALLOC_COLORS[i%ALLOC_COLORS.length]}}/></div>
-                      <div className="k-alloc-pct">{pos.pct}%</div>
-                      <div className="k-alloc-val">{fmtM(pos.val)}</div>
+                    <div key={i} style={{marginBottom:showK401Edit?12:0}}>
+                      {showK401Edit?(
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 70px 80px 28px",gap:6,alignItems:"center",marginBottom:4}}>
+                          <input className="setup-input" value={pos.name}
+                            onChange={e=>setK401(prev=>({...prev,positions:prev.positions.map((p,j)=>j===i?{...p,name:e.target.value}:p)}))}
+                            style={{fontSize:11,padding:"5px 8px"}} placeholder="Fund name"/>
+                          <input className="setup-input" type="number" value={pos.pct} step="0.1" min="0" max="100"
+                            onChange={e=>setK401(prev=>({...prev,positions:prev.positions.map((p,j)=>j===i?{...p,pct:parseFloat(e.target.value)||0,val:Math.round((parseFloat(e.target.value)||0)/100*prev.total)}:p)}))}
+                            style={{fontSize:11,padding:"5px 8px"}} placeholder="%"/>
+                          <input className="setup-input" type="number" value={pos.val}
+                            onChange={e=>setK401(prev=>({...prev,positions:prev.positions.map((p,j)=>j===i?{...p,val:parseFloat(e.target.value)||0}:p)}))}
+                            style={{fontSize:11,padding:"5px 8px"}} placeholder="$"/>
+                          <button onClick={()=>setK401(prev=>({...prev,positions:prev.positions.filter((_,j)=>j!==i)}))}
+                            style={{color:"var(--r)",fontSize:16,padding:"0 4px"}}>×</button>
+                        </div>
+                      ):(
+                        <div className="k-alloc-row">
+                          <div className="k-alloc-name">{pos.name}</div>
+                          <div className="k-alloc-bar"><div className="k-alloc-fill" style={{width:`${pos.pct}%`,background:ALLOC_COLORS[i%ALLOC_COLORS.length]}}/></div>
+                          <div className="k-alloc-pct">{pos.pct}%</div>
+                          <div className="k-alloc-val">{fmtM(pos.val)}</div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
+
+                {/* ── ACCOUNTS ── */}
+                <div className="k-alloc" style={{marginTop:0}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                    <div className="k-alloc-title" style={{marginBottom:0}}>Accounts</div>
+                  </div>
+                  {[
+                    {label:"401k (Empower)",key:"total",sub:"Pre-tax contributions"},
+                    {label:"Roth IRA (WeBull)",key:"rothBalance",sub:"After-tax, tax-free growth"},
+                    {label:"SDBA Sleeve",key:"sdbaBalance",sub:"Self-directed brokerage"},
+                  ].map((acct,i)=>(
+                    <div key={i} className="k-alloc-row" style={{alignItems:"center"}}>
+                      <div className="k-alloc-name" style={{width:180}}>{acct.label}</div>
+                      {showK401Edit?(
+                        <input className="setup-input" type="number"
+                          value={k401[acct.key]??0}
+                          onChange={e=>setK401(prev=>({...prev,[acct.key]:parseFloat(e.target.value)||0}))}
+                          style={{flex:1,fontSize:11,padding:"5px 8px",maxWidth:120}}/>
+                      ):(
+                        <>
+                          <div className="k-alloc-bar"><div className="k-alloc-fill" style={{width:`${Math.min(100,(k401[acct.key]??0)/2000)}%`,background:ALLOC_COLORS[i]}}/></div>
+                          <div className="k-alloc-val" style={{width:80,textAlign:"right"}}>{fmtM(k401[acct.key]??0)}</div>
+                        </>
+                      )}
+                      <div style={{fontSize:10,color:"var(--sub)",marginLeft:8,width:160}}>{acct.sub}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── EMPOWER CONNECT ── */}
                 <div className="k-connect">
                   <div className="k-connect-title">Connect live Empower data</div>
                   <div className="k-connect-body">Empower's developer API supports participant balance access. Here's how to get access as an individual:</div>
@@ -1291,19 +1473,6 @@ export default function App(){
                     ))}
                   </div>
                   <button className="k-edit-btn" onClick={()=>window.open("https://developer.empower-retirement.com","_blank")}>Open Empower Portal ↗</button>
-                  <div style={{marginTop:12}}>
-                    <button className="k-edit-btn" onClick={()=>setShowK401Edit(p=>!p)}>{showK401Edit?"Hide":"Edit manually"}</button>
-                  </div>
-                  {showK401Edit&&(
-                    <div style={{marginTop:16,textAlign:"left"}}>
-                      {[{label:"Total Balance ($)",key:"total"},{label:"YTD Return (%)",key:"ytdReturn"},{label:"YTD Contributions ($)",key:"contributions"}].map(f=>(
-                        <div className="setup-field" key={f.key}>
-                          <label className="setup-label">{f.label}</label>
-                          <input className="setup-input" type="number" value={k401[f.key]} onChange={e=>setK401(prev=>({...prev,[f.key]:parseFloat(e.target.value)||0}))}/>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
               </div>
             )}
